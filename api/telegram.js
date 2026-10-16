@@ -87,8 +87,9 @@ async function answerCallback(callbackId) {
 function menuKeyboard() {
   return {
     keyboard: [
-      [{ text: "Next arrivals" }, { text: "My favourites" }],
+      [{ text: "My favourite stops" }],
       [{ text: "Add a favourite" }],
+      [{ text: "Manage favourites" }],
     ],
     resize_keyboard: true,
   };
@@ -97,9 +98,11 @@ function menuKeyboard() {
 async function showMenu(chatId) {
   await sendMessage(
     chatId,
-    "Welcome to My Bus Bot. What would you like to do?",
+    "Choose a bus stop to see the next arrivals for all your saved services.",
     { reply_markup: menuKeyboard() }
   );
+
+  await showFavourites(chatId, "arrivals");
 }
 
 async function getFavourites() {
@@ -238,6 +241,7 @@ function getNextThree(service) {
     .filter(Boolean);
 }
 
+
 async function showFavourites(chatId, mode = "arrivals") {
   const favourites = await getFavourites();
 
@@ -250,35 +254,49 @@ async function showFavourites(chatId, mode = "arrivals") {
     return;
   }
 
-  const buttons = favourites.map((item) => {
-    const title = item.label
-      ? `${item.label} · ${item.serviceNo}`
-      : `${item.serviceNo} · ${item.stopCode}`;
+  if (mode === "arrivals") {
+    const stops = new Map();
 
-    if (mode === "manage") {
-      return [
-        {
-          text: `View ${title}`,
-          callback_data: `f:${item.rowNumber}`,
-        },
-        {
-          text: `Remove ${item.serviceNo} · ${item.stopCode}`,
-          callback_data: `r:${item.rowNumber}`,
-        },
-      ];
+    for (const item of favourites) {
+      if (!stops.has(item.stopCode)) {
+        stops.set(item.stopCode, {
+          stopCode: item.stopCode,
+          stopName: item.stopName,
+        });
+      }
     }
 
-    return [{
-      text: title,
+    const buttons = Array.from(stops.values()).map((stop) => ({
+      text: `${stop.stopName} (${stop.stopCode})`,
+      callback_data: `s:${stop.stopCode}`,
+    }));
+
+    await sendMessage(
+      chatId,
+      "Choose a bus stop to compare all your saved bus services there.",
+      {
+        reply_markup: {
+          inline_keyboard: buttons.map((button) => [button]),
+        },
+      }
+    );
+    return;
+  }
+
+  const buttons = favourites.map((item) => [
+    {
+      text: `View ${item.serviceNo} · ${item.stopCode}`,
       callback_data: `f:${item.rowNumber}`,
-    }];
-  });
+    },
+    {
+      text: `Remove ${item.serviceNo} · ${item.stopCode}`,
+      callback_data: `r:${item.rowNumber}`,
+    },
+  ]);
 
   await sendMessage(
     chatId,
-    mode === "manage"
-      ? "Your saved favourites. Choose one to view arrivals or remove it."
-      : "Choose a bus service to see its next arrivals.",
+    "Your saved favourites. Choose one to view arrivals or remove it.",
     {
       reply_markup: {
         inline_keyboard: buttons,
@@ -287,47 +305,79 @@ async function showFavourites(chatId, mode = "arrivals") {
   );
 }
 
-async function showArrivals(chatId, favourite) {
-  const heading =
-    `${favourite.stopName || "Bus stop"} (${favourite.stopCode})\n` +
-    `Service ${favourite.serviceNo}`;
 
-  const service = await getBusArrival(
-    favourite.stopCode,
-    favourite.serviceNo
+async function showStopArrivals(chatId, stopCode) {
+  const favourites = (await getFavourites()).filter(
+    (item) => item.stopCode === stopCode
   );
 
-  if (!service) {
-    await sendMessage(
-      chatId,
-      `${heading}\n\nLTA did not return this bus service at the stop. Check the stop code and service number.`
-    );
+  if (!favourites.length) {
+    await sendMessage(chatId, "No saved bus services were found for this stop.");
     return;
   }
 
-  const arrivals = getNextThree(service);
-  const lines = arrivals.length
-    ? arrivals.map((time, index) => `${index + 1}. ${time}`).join("\n")
-    : "No arrival estimates are available right now.";
+  const stopName = favourites[0].stopName || "Bus stop";
+  const results = await Promise.all(
+    favourites.map(async (item) => {
+      try {
+        const service = await getBusArrival(
+          item.stopCode,
+          item.serviceNo
+        );
 
-  await sendMessage(
-    chatId,
-    `${heading}\n\nNext arrivals:\n${lines}`,
-    {
-      reply_markup: {
-        inline_keyboard: [[
+        if (!service) {
+          return {
+            serviceNo: item.serviceNo,
+            times: ["No arrival data available"],
+          };
+        }
+
+        const times = getNextThree(service);
+
+        return {
+          serviceNo: item.serviceNo,
+          times: times.length
+            ? times
+            : ["No arrival estimates available"],
+        };
+      } catch (error) {
+        console.error(
+          `Arrival lookup failed for service ${item.serviceNo}:`,
+          error.message
+        );
+
+        return {
+          serviceNo: item.serviceNo,
+          times: ["Unable to retrieve arrivals"],
+        };
+      }
+    })
+  );
+
+  const sections = results.map((result) =>
+    `Service ${result.serviceNo}\n${result.times.join(" · ")}`
+  );
+
+  const message =
+    `${stopName} (${stopCode})\n\n` +
+    sections.join("\n\n");
+
+  await sendMessage(chatId, message, {
+    reply_markup: {
+      inline_keyboard: [
+        [
           {
             text: "Refresh arrivals",
-            callback_data: `f:${favourite.rowNumber}`,
+            callback_data: `s:${stopCode}`,
           },
           {
-            text: "Back to favourites",
+            text: "Back to stops",
             callback_data: "next",
           },
-        ]],
-      },
-    }
-  );
+        ],
+      ],
+    },
+  });
 }
 
 async function removeFavourite(chatId, rowNumber) {
@@ -372,12 +422,12 @@ async function handleText(chatId, text) {
     return;
   }
 
-  if (message === "Next arrivals") {
+  if (message === "My favourite stops") {
     await showFavourites(chatId, "arrivals");
     return;
   }
 
-  if (message === "My favourites") {
+  if (message === "Manage favourites") {
     await showFavourites(chatId, "manage");
     return;
   }
@@ -465,6 +515,13 @@ async function handleCallback(callback) {
   if (!chatId) return;
 
   const data = callback.data || "";
+
+  const stopMatch = data.match(/^s:(\d+)$/);
+
+  if (stopMatch) {
+    await showStopArrivals(chatId, stopMatch[1]);
+    return;
+  }
 
   if (data === "next") {
     await showFavourites(chatId, "arrivals");
